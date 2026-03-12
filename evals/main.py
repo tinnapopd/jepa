@@ -130,18 +130,46 @@ if __name__ == '__main__':
         print(f'Dataset downloaded to: {dataset_path}')
 
         # Override data paths in config with downloaded dataset
-        # Expects dataset to contain train.csv and val.csv (or the files referenced in config)
         if 'data' in params:
             train_csv = params['data'].get('dataset_train', '')
             val_csv = params['data'].get('dataset_val', '')
 
-            # If the original paths are just filenames, prefix with dataset_path
-            # Otherwise, override with dataset_path versions
             train_basename = os.path.basename(train_csv) if train_csv else 'train.csv'
             val_basename = os.path.basename(val_csv) if val_csv else 'val.csv'
 
             new_train = os.path.join(dataset_path, train_basename)
             new_val = os.path.join(dataset_path, val_basename)
+
+            # Rewrite CSV files: replace relative video paths with absolute paths
+            for csv_path in [new_train, new_val]:
+                if not os.path.exists(csv_path):
+                    continue
+                with open(csv_path, 'r') as f:
+                    lines = f.readlines()
+                new_lines = []
+                for line in lines:
+                    parts = line.strip().split(' ')
+                    if len(parts) >= 2:
+                        video_rel_path = parts[0]
+                        # Try to resolve the video path relative to the dataset download dir
+                        video_abs_path = os.path.join(dataset_path, os.path.basename(os.path.dirname(video_rel_path)), os.path.basename(video_rel_path))
+                        if not os.path.exists(video_abs_path):
+                            # Try walking the dataset dir to find the file
+                            video_fname = os.path.basename(video_rel_path)
+                            found = False
+                            for root, dirs, files in os.walk(dataset_path):
+                                if video_fname in files:
+                                    video_abs_path = os.path.join(root, video_fname)
+                                    found = True
+                                    break
+                            if not found:
+                                video_abs_path = video_rel_path  # keep original
+                        new_lines.append(f'{video_abs_path} {" ".join(parts[1:])}\n')
+                    else:
+                        new_lines.append(line)
+                with open(csv_path, 'w') as f:
+                    f.writelines(new_lines)
+                print(f'  Rewrote video paths in {csv_path}')
 
             if os.path.exists(new_train):
                 params['data']['dataset_train'] = new_train
