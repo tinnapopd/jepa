@@ -6,11 +6,15 @@
 #
 
 import argparse
+import os
 
 import multiprocessing as mp
 
 import pprint
 import yaml
+
+from clearml import Dataset as ClearMLDataset, InputModel
+from clearml import Task
 
 from src.utils.distributed import init_distributed
 
@@ -25,9 +29,34 @@ parser.add_argument(
     '--devices', type=str, nargs='+', default=['cuda:0'],
     help='which devices to use on local machine')
 
+# -- ClearML arguments
+parser.add_argument(
+    '--project', type=str, default='V-JEPA',
+    help='ClearML project name')
+parser.add_argument(
+    '--task_name', type=str, default=None,
+    help='ClearML task name (defaults to config eval_name)')
+parser.add_argument(
+    '--remote', action='store_true', default=False,
+    help='Execute on a remote ClearML agent queue')
+parser.add_argument(
+    '--queue', type=str, default='default',
+    help='ClearML agent queue name (default: "default")')
+parser.add_argument(
+    '--output_uri', type=str, default=None,
+    help='ClearML output URI for model artifacts (e.g. s3://bucket/models)')
+parser.add_argument(
+    '--dataset_id', type=str, default=None,
+    help='ClearML dataset ID — downloads on remote agent and overrides data paths in config')
+parser.add_argument(
+    '--packages', type=str, nargs='*', default=None,
+    help='Extra pip packages to install on remote agent')
+parser.add_argument(
+    '--model_id', type=str, default=None,
+    help='ClearML model ID — downloads pretrained model on remote agent and overrides pretrain paths')
+
 
 def process_main(rank, fname, world_size, devices):
-    import os
     os.environ['CUDA_VISIBLE_DEVICES'] = str(devices[rank].split(':')[-1])
 
     import logging
@@ -58,6 +87,100 @@ def process_main(rank, fname, world_size, devices):
 
 if __name__ == '__main__':
     args = parser.parse_args()
+
+    # -- Load config early for ClearML
+    with open(args.fname, 'r') as y_file:
+        params = yaml.load(y_file, Loader=yaml.FullLoader)
+
+    # -- Initialize ClearML task (before spawning workers so all logs are captured)
+    clearml_task_name = args.task_name or params.get('eval_name', 'vjepa-eval')
+    init_kwargs = dict(
+        project_name=args.project,
+        task_name=clearml_task_name,
+        task_type=Task.TaskTypes.training,
+    )
+    if args.output_uri:
+        init_kwargs['output_uri'] = args.output_uri
+
+    task = Task.init(**init_kwargs)
+
+    # Override repo URL to HTTPS (so the agent can clone without SSH keys)
+    task.set_repo(repo='https://github.com/facebookresearch/jepa.git')
+    task.connect(params)
+
+    # -- Set required packages for remote execution
+    if args.packages:
+        task.set_packages(packages=args.packages)
+    elif os.path.exists('requirements.txt'):
+        with open('requirements.txt', 'r') as f:
+            pkgs = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        if 'clearml' not in pkgs:
+            pkgs.append('clearml')
+        task.set_packages(packages=pkgs)
+
+    # -- Remote execution: enqueue and exit locally
+    if args.remote:
+        task.execute_remotely(queue_name=args.queue, exit_process=True)
+
+    # -- If a ClearML dataset ID is specified, download it and override data paths
+    if args.dataset_id:
+        print(f'Downloading ClearML dataset: {args.dataset_id}')
+        dataset = ClearMLDataset.get(dataset_id=args.dataset_id)
+        dataset_path = dataset.get_local_copy()
+        print(f'Dataset downloaded to: {dataset_path}')
+
+        # Override data paths in config with downloaded dataset
+        # Expects dataset to contain train.csv and val.csv (or the files referenced in config)
+        if 'data' in params:
+            train_csv = params['data'].get('dataset_train', '')
+            val_csv = params['data'].get('dataset_val', '')
+
+            # If the original paths are just filenames, prefix with dataset_path
+            # Otherwise, override with dataset_path versions
+            train_basename = os.path.basename(train_csv) if train_csv else 'train.csv'
+            val_basename = os.path.basename(val_csv) if val_csv else 'val.csv'
+
+            new_train = os.path.join(dataset_path, train_basename)
+            new_val = os.path.join(dataset_path, val_basename)
+
+            if os.path.exists(new_train):
+                params['data']['dataset_train'] = new_train
+                print(f'  dataset_train -> {new_train}')
+            if os.path.exists(new_val):
+                params['data']['dataset_val'] = new_val
+                print(f'  dataset_val -> {new_val}')
+
+        # Re-write the config so spawned workers pick up the new paths
+        updated_fname = os.path.join(dataset_path, '_clearml_config.yaml')
+        with open(updated_fname, 'w') as f:
+            yaml.dump(params, f)
+        args.fname = updated_fname
+
+    # -- If a ClearML model ID is specified, download it and override pretrain paths
+    if args.model_id:
+        print(f'Downloading ClearML model: {args.model_id}')
+        model = InputModel(model_id=args.model_id)
+        model_path = model.get_local_copy()
+        print(f'Model downloaded to: {model_path}')
+
+        # Override pretrain paths in config
+        if 'pretrain' in params:
+            model_dir = os.path.dirname(model_path)
+            model_fname = os.path.basename(model_path)
+            params['pretrain']['folder'] = model_dir
+            params['pretrain']['checkpoint'] = model_fname
+            print(f'  pretrain.folder -> {model_dir}')
+            print(f'  pretrain.checkpoint -> {model_fname}')
+
+        # Re-write the config so spawned workers pick up the new paths
+        config_dir = os.path.dirname(args.fname)
+        if not os.path.isabs(args.fname) or config_dir == '':
+            config_dir = os.getcwd()
+        updated_fname = os.path.join(config_dir, '_clearml_config.yaml')
+        with open(updated_fname, 'w') as f:
+            yaml.dump(params, f)
+        args.fname = updated_fname
+
     num_gpus = len(args.devices)
     mp.set_start_method('spawn')
     for rank in range(num_gpus):

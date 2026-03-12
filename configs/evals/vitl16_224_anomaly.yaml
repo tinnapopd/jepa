@@ -1,0 +1,42 @@
+nodes: 1
+tasks_per_node: 1
+tag: anomaly-16x3x3
+eval_name: video_classification_frozen
+resume_checkpoint: false
+
+data:
+  dataset_train: /home/sp/sp/jepa/datasets/train.csv
+  dataset_val: /home/sp/sp/jepa/datasets/val.csv
+  dataset_type: VideoDataset
+  num_classes: 2
+  frames_per_clip: 16
+  num_segments: 3
+  num_views_per_segment: 3
+  frame_step: 4
+
+optimization:
+  attend_across_segments: true
+  num_epochs: 30
+  resolution: 224
+  batch_size: 4
+  weight_decay: 0.01
+  lr: 0.0005
+  start_lr: 0.0005
+  final_lr: 0.0
+  warmup: 0.
+  use_bfloat16: true
+
+pretrain:
+  model_name: vit_large
+  checkpoint_key: target_encoder
+  clip_duration: null
+  frames_per_clip: 16
+  tubelet_size: 2
+  uniform_power: true
+  use_silu: false
+  tight_silu: false
+  use_sdpa: true
+  patch_size: 16
+  folder: /home/sp/sp/jepa/pretrained/
+  checkpoint: vitl16.pth.tar
+  write_tag: custom-jepa

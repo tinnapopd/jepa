@@ -48,6 +48,8 @@ from src.utils.logging import (
     CSVLogger
 )
 
+from clearml import Logger as ClearMLLogger
+
 logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -256,6 +258,10 @@ def main(args_eval, resume_preempt=False):
         logger.info('[%5d] train: %.3f%% test: %.3f%%' % (epoch + 1, train_acc, val_acc))
         if rank == 0:
             csv_logger.log(epoch + 1, train_acc, val_acc)
+            clearml_logger = ClearMLLogger.current_logger()
+            if clearml_logger:
+                clearml_logger.report_scalar('Accuracy', 'Train', value=train_acc, iteration=epoch + 1)
+                clearml_logger.report_scalar('Accuracy', 'Validation', value=val_acc, iteration=epoch + 1)
         save_checkpoint(epoch + 1)
 
 
@@ -313,6 +319,10 @@ def run_one_epoch(
             logger.info('[%5d] %.3f%% (loss: %.3f) [mem: %.2e]'
                         % (itr, top1_meter.avg, loss,
                            torch.cuda.max_memory_allocated() / 1024.**2))
+            if training:
+                clearml_logger = ClearMLLogger.current_logger()
+                if clearml_logger:
+                    clearml_logger.report_scalar('Loss', 'Train', value=float(loss), iteration=itr)
 
     return top1_meter.avg
 
