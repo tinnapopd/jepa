@@ -11,3 +11,5 @@ decord
 pandas
 einops
 beartype
+clearml[s3]
+boto3
