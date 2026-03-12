@@ -104,8 +104,12 @@ if __name__ == '__main__':
 
     task = Task.init(**init_kwargs)
 
-    # Override repo URL to HTTPS (so the agent can clone without SSH keys)
-    task.set_repo(repo='https://github.com/facebookresearch/jepa.git')
+    # Override repo to HTTPS + latest main (local commits don't exist in public repo)
+    task.set_repo(
+        repo='https://github.com/facebookresearch/jepa.git',
+        branch='main',
+        commit='',
+    )
     task.connect(params)
 
     # -- Set required packages for remote execution
