@@ -48,7 +48,7 @@ from src.utils.logging import (
     CSVLogger
 )
 
-from clearml import Logger as ClearMLLogger
+from clearml import Logger as ClearMLLogger, OutputModel, Task as ClearMLTask
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -263,6 +263,21 @@ def main(args_eval, resume_preempt=False):
                 clearml_logger.report_scalar('Accuracy', 'Train', value=train_acc, iteration=epoch + 1)
                 clearml_logger.report_scalar('Accuracy', 'Validation', value=val_acc, iteration=epoch + 1)
         save_checkpoint(epoch + 1)
+
+    # Upload trained model to ClearML
+    if rank == 0:
+        current_task = ClearMLTask.current_task()
+        if current_task and os.path.exists(latest_path):
+            output_model = OutputModel(
+                task=current_task,
+                name=f'{tag}-classifier',
+                framework='PyTorch',
+            )
+            output_model.update_weights(
+                weights_filename=latest_path,
+                auto_delete_file=False,
+            )
+            logger.info(f'Uploaded trained model to ClearML: {output_model.id}')
 
 
 def run_one_epoch(
