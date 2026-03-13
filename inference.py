@@ -1,5 +1,6 @@
 import argparse
 import collections
+import glob
 import logging
 import os
 import time
@@ -395,8 +396,8 @@ def main():
     parser.add_argument(
         "--video",
         type=str,
-        default="sample.mp4",
-        help="Path to input video file",
+        default=None,
+        help="Path to input video file / video directory",
     )
     parser.add_argument(
         "--checkpoint",
@@ -413,13 +414,13 @@ def main():
     parser.add_argument(
         "--probe-checkpoint",
         type=str,
-        default="pretrained/ssv2-probe.pth.tar",
+        default="pretrained/custom-jepa.pth.tar",
         help="Path to a trained classification probe (.pth.tar) ",
     )
     parser.add_argument(
         "--top-k",
         type=int,
-        default=5,
+        default=2,
         help="Number of top action predictions to show",
     )
     parser.add_argument(
@@ -427,13 +428,6 @@ def main():
         action="store_true",
         help="Enable streaming mode: slide a window "
         "through the video (or use 'webcam')",
-    )
-    parser.add_argument(
-        "--output-video",
-        type=str,
-        default="sample-output.mp4",
-        help="Path to save annotated output video with "
-        "predictions overlaid (.mp4)",
     )
     args = parser.parse_args()
 
@@ -461,58 +455,66 @@ def main():
         else:
             labels = [f"class_{i}" for i in range(num_classes)]
 
-    if args.stream:
-        if classifier is None or labels is None:
-            raise SystemExit("Error: --stream requires --probe-checkpoint")
+    if args.video is None:
+        raise SystemExit("Error: --video is required")
 
-        stream_predict(
-            video_source=args.video,
-            encoder=encoder,
-            classifier=classifier,
-            labels=labels,
-            top_k=args.top_k,
-            device=device,
-            output_video=args.output_video,
-        )
-        return
-
-    logger.info(f"Loading video: {args.video}")
-    video = load_video_frames(args.video)
-    video = video.to(device=device, dtype=torch.float16)
-    logger.info(
-        f"Video tensor shape: {video.shape}  "
-        f"(batch, channels, frames, height, width)"
-    )
-
-    logger.info("Running inference...")
-    with torch.no_grad():
-        features = encoder(video)
-    del video
-    features = features.cpu()
-    torch.cuda.empty_cache()
-
-    if classifier is not None and labels is not None:
-        predictions = predict_action(
-            features,
-            classifier,
-            labels,
-            top_k=args.top_k,
-        )
-        print("\n" + "=" * 50)
-        print("  Action Predictions")
-        print("=" * 50)
-        for rank, (name, conf) in enumerate(predictions, 1):
-            bar = "\u2588" * int(conf * 30)
-            print(f"  {rank}. {name:40s} {conf * 100:5.1f}% {bar}")
-        print("=" * 50 + "\n")
+    if os.path.isdir(args.video):
+        video_paths = glob.glob(os.path.join(args.video, "*.mp4"))
     else:
-        logger.info("Tip: pass --probe-checkpoint to predict actions.")
+        video_paths = [args.video]
 
-    if args.output:
-        torch.save(features.cpu(), args.output)
-        logger.info(f"Features saved to: {args.output}")
+    for video_path in video_paths:
+        if args.stream and (classifier is not None) and (labels is not None):
+            output_video = os.path.join(
+                os.path.dirname(video_path),
+                "output_" + os.path.basename(video_path),
+            )
+            stream_predict(
+                video_source=video_path,
+                encoder=encoder,
+                classifier=classifier,
+                labels=labels,
+                top_k=args.top_k,
+                device=device,
+                output_video=output_video,
+            )
+            continue
 
-    return features
+        logger.info(f"Loading video: {args.video}")
+        video = load_video_frames(args.video)
+        video = video.to(device=device, dtype=torch.float16)
+        logger.info(
+            f"Video tensor shape: {video.shape}  "
+            f"(batch, channels, frames, height, width)"
+        )
+
+        logger.info("Running inference...")
+        with torch.no_grad():
+            features = encoder(video)
+        del video
+        features = features.cpu()
+        torch.cuda.empty_cache()
+
+        if classifier is not None and labels is not None:
+            predictions = predict_action(
+                features,
+                classifier,
+                labels,
+                top_k=args.top_k,
+            )
+            print("\n" + "=" * 50)
+            print("  Action Predictions")
+            print("=" * 50)
+            for rank, (name, conf) in enumerate(predictions, 1):
+                bar = "\u2588" * int(conf * 30)
+                print(f"  {rank}. {name:40s} {conf * 100:5.1f}% {bar}")
+            print("=" * 50 + "\n")
+        else:
+            logger.info("Tip: pass --probe-checkpoint to predict actions.")
+
+        if args.output:
+            torch.save(features.cpu(), args.output)
+            logger.info(f"Features saved to: {args.output}")
 
 
 if __name__ == "__main__":

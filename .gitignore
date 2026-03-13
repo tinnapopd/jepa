@@ -8,3 +8,6 @@ datasets/
 
 # Models
 *.pth.tar
+
+# Output
+*.mp4
