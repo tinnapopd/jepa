@@ -98,9 +98,8 @@ if __name__ == '__main__':
         project_name=args.project,
         task_name=clearml_task_name,
         task_type=Task.TaskTypes.training,
+        output_uri=args.output_uri or 's3://ai-dataset-clearml/clearml/models',
     )
-    if args.output_uri:
-        init_kwargs['output_uri'] = args.output_uri
 
     task = Task.init(**init_kwargs)
 

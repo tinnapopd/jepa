@@ -40,7 +40,7 @@ from src.utils.schedulers import (
 )
 from src.utils.logging import AverageMeter, CSVLogger
 
-from clearml import Logger as ClearMLLogger, OutputModel, Task as ClearMLTask
+from clearml import Logger as ClearMLLogger, Task as ClearMLTask
 
 from evals.video_classification_frozen.utils import (
     make_transforms,
@@ -262,7 +262,7 @@ def main(args_eval, resume_preempt=False):
     # TRAIN LOOP
     for epoch in range(start_epoch, num_epochs):
         logger.info("Epoch %d" % (epoch + 1))
-        train_acc = run_one_epoch(
+        train_acc, train_loss = run_one_epoch(
             device=device,
             training=True,
             num_temporal_views=eval_num_segments
@@ -280,7 +280,7 @@ def main(args_eval, resume_preempt=False):
             use_bfloat16=use_bfloat16,
         )
 
-        val_acc = run_one_epoch(
+        val_acc, val_loss = run_one_epoch(
             device=device,
             training=False,
             num_temporal_views=eval_num_segments,
@@ -313,24 +313,30 @@ def main(args_eval, resume_preempt=False):
                     value=val_acc,
                     iteration=epoch + 1,
                 )
+                clearml_logger.report_scalar(
+                    "Loss", "Train", value=train_loss, iteration=epoch + 1
+                )
+                clearml_logger.report_scalar(
+                    "Loss",
+                    "Validation",
+                    value=val_loss,
+                    iteration=epoch + 1,
+                )
         save_checkpoint(epoch + 1)
 
     # Upload trained model to ClearML
     if rank == 0:
         current_task = ClearMLTask.current_task()
         if current_task and os.path.exists(latest_path):
-            output_model = OutputModel(
-                task=current_task,
-                name=f"{tag}-classifier",
-                framework="PyTorch",
-            )
-            output_model.update_weights(
-                weights_filename=latest_path,
+            current_task.update_output_model(
+                model_path=latest_path,
+                model_name=f"{tag}-classifier",
                 auto_delete_file=False,
             )
-            logger.info(
-                f"Uploaded trained model to ClearML: {output_model.id}"
-            )
+            logger.info("Uploaded trained model to ClearML")
+            # Wait for the upload to fully complete before process exits
+            current_task.flush(wait_for_uploads=True)
+            logger.info("ClearML upload flush complete")
 
 
 def run_one_epoch(
@@ -352,6 +358,7 @@ def run_one_epoch(
     classifier.train(mode=training)
     criterion = torch.nn.CrossEntropyLoss()
     top1_meter = AverageMeter()
+    loss_meter = AverageMeter()
     for itr, data in enumerate(data_loader):
         if training:
             scheduler.step()
@@ -426,6 +433,7 @@ def run_one_epoch(
             )
             top1_acc = float(AllReduce.apply(top1_acc))
             top1_meter.update(top1_acc)
+            loss_meter.update(float(loss))
 
         if training:
             if use_bfloat16:
@@ -450,14 +458,8 @@ def run_one_epoch(
                     torch.cuda.max_memory_allocated() / 1024.0**2,
                 )
             )
-            if training:
-                clearml_logger = ClearMLLogger.current_logger()
-                if clearml_logger:
-                    clearml_logger.report_scalar(
-                        "Loss", "Train", value=float(loss), iteration=itr
-                    )
 
-    return top1_meter.avg
+    return top1_meter.avg, loss_meter.avg
 
 
 def load_checkpoint(device, r_path, classifier, opt, scaler):
