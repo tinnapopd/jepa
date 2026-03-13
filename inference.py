@@ -78,14 +78,13 @@ def load_video_frames(video_path: str) -> torch.Tensor:
 
 
 def load_encoder(
-    model_name: str = "vit_large",
     checkpoint_path: Optional[str] = None,
     uniform_power: bool = True,
     use_sdpa: bool = True,
     checkpoint_key: str = "target_encoder",
     device: str = "cpu",
 ) -> vit.VisionTransformer:
-    encoder = vit.__dict__[model_name](
+    encoder = vit.__dict__["vit_large"](
         img_size=224,
         patch_size=16,
         num_frames=16,
@@ -436,7 +435,6 @@ def main():
 
     # Load model
     encoder = load_encoder(
-        model_name=args.model_name,
         checkpoint_path=args.checkpoint,
         checkpoint_key=args.checkpoint_key,
         device=device,
