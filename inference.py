@@ -149,6 +149,7 @@ def load_encoder(
 
     encoder = encoder.to(device)
     encoder.eval()
+    encoder.half()  # FP16 inference to reduce GPU memory
     return encoder
 
 
@@ -184,6 +185,7 @@ def load_classifier(
 
     classifier = classifier.to(device)
     classifier.eval()
+    classifier.half()  # FP16 inference to reduce GPU memory
     return classifier, num_classes
 
 
@@ -308,7 +310,9 @@ def stream_predict(
             # Wait until buffer is full, then predict every 16 frames
             if len(buf) == 16 and (frame_idx - 16) % 16 == 0:
                 clip = torch.stack(list(buf))  # [T,H,W,C]
-                clip = preprocess_frames(clip).to(device)
+                clip = preprocess_frames(clip).to(
+                    device=device, dtype=torch.float16
+                )
 
                 t0 = time.time()
                 with torch.no_grad():
@@ -320,6 +324,8 @@ def stream_predict(
                     top_k,
                 )
                 dt = time.time() - t0
+                del clip, feats
+                torch.cuda.empty_cache()
 
                 window_count += 1
                 current_label = preds[0][0]
@@ -472,7 +478,7 @@ def main():
 
     logger.info(f"Loading video: {args.video}")
     video = load_video_frames(args.video)
-    video = video.to(device)
+    video = video.to(device=device, dtype=torch.float16)
     logger.info(
         f"Video tensor shape: {video.shape}  "
         f"(batch, channels, frames, height, width)"
@@ -481,6 +487,9 @@ def main():
     logger.info("Running inference...")
     with torch.no_grad():
         features = encoder(video)
+    del video
+    features = features.cpu()
+    torch.cuda.empty_cache()
 
     if classifier is not None and labels is not None:
         predictions = predict_action(
