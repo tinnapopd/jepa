@@ -1,10 +1,13 @@
 import argparse
 import collections
 import glob
+import json
 import logging
 import os
 import time
 from typing import Optional, Tuple, List
+
+import numpy as np
 
 import cv2
 from decord import VideoReader, cpu
@@ -210,6 +213,100 @@ def predict_action(
     return predictions
 
 
+def compute_gradcam(
+    encoder: vit.VisionTransformer,
+    classifier: AttentiveClassifier,
+    clip: torch.Tensor,
+    target_class_idx: int,
+) -> np.ndarray:
+    """Compute GradCAM heatmap from the last encoder block.
+
+    Returns a 2-D numpy heatmap of shape (grid_h, grid_w) in [0, 1].
+    The ViT produces (T/tubelet, H/patch, W/patch) tokens; we average
+    over the temporal dimension to get a spatial heatmap.
+    """
+    activation = {}
+
+    def _hook_fn(module, input, output):
+        # Block.forward returns just x (tensor), not a tuple
+        if isinstance(output, torch.Tensor):
+            activation["value"] = output
+        else:
+            activation["value"] = output[0]
+        # Retain grad on this intermediate tensor so .backward() populates .grad
+        activation["value"].retain_grad()
+
+    handle = encoder.blocks[-1].register_forward_hook(_hook_fn)
+
+    # We need gradients for this pass
+    clip_grad = clip.clone().detach().requires_grad_(False)
+    # Enable grads for the model parameters temporarily
+    with torch.enable_grad():
+        feats = encoder(clip_grad)
+        logits = classifier(feats)
+        target_score = logits[0, target_class_idx]
+        target_score.backward(retain_graph=False)
+
+    handle.remove()
+
+    # activation["value"] shape: [B, N_patches, D]
+    act = activation["value"].detach()  # [1, N, D]
+    grad = activation["value"].grad  # [1, N, D]
+
+    if grad is None:
+        # Fallback: uniform heatmap
+        gs = encoder.input_size // encoder.patch_size
+        return np.ones((gs, gs), dtype=np.float32) * 0.5
+
+    # Channel-wise weights: global average pool of gradients
+    weights = grad.mean(dim=1, keepdim=True)  # [1, 1, D]
+    cam = (weights * act).sum(dim=-1)  # [1, N]
+    cam = torch.relu(cam)
+
+    # Reshape to spatio-temporal grid
+    gs = encoder.input_size // encoder.patch_size  # 14
+    gd = encoder.num_frames // encoder.tubelet_size  # 8
+    cam = cam.view(1, gd, gs, gs)  # [1, T, H, W]
+
+    # Average over temporal dimension → spatial heatmap
+    cam = cam.mean(dim=1).squeeze(0)  # [H, W]
+
+    # Normalize to [0, 1]
+    cam_min = cam.min()
+    cam_max = cam.max()
+    if cam_max - cam_min > 0:
+        cam = (cam - cam_min) / (cam_max - cam_min)
+    else:
+        cam = torch.zeros_like(cam)
+
+    return cam.cpu().float().numpy()
+
+
+def overlay_heatmap(
+    frame: np.ndarray,
+    heatmap: np.ndarray,
+    alpha: float = 0.4,
+) -> np.ndarray:
+    """Overlay a GradCAM heatmap on a BGR frame.
+
+    Args:
+        frame: BGR uint8 image [H, W, 3].
+        heatmap: 2-D float array in [0, 1] (any spatial size).
+        alpha: blending weight for the heatmap.
+
+    Returns:
+        Blended BGR uint8 image.
+    """
+    h, w = frame.shape[:2]
+    heatmap_resized = cv2.resize(
+        heatmap, (w, h), interpolation=cv2.INTER_LINEAR
+    )
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)  # type:ignore
+    blended = cv2.addWeighted(frame, 1.0 - alpha, colored, alpha, 0)
+    return blended
+
+
 def stream_predict(
     video_source: str,
     encoder: vit.VisionTransformer,
@@ -218,6 +315,7 @@ def stream_predict(
     top_k: int = 5,
     device: str = "cpu",
     output_video: Optional[str] = None,
+    output_gradcam: Optional[str] = None,
 ):
     src = 0 if video_source == "webcam" else video_source
     cap = cv2.VideoCapture(src)
@@ -238,6 +336,7 @@ def stream_predict(
     current_label = ""
     current_conf = 0.0
     class_counts = collections.Counter()
+    anomaly_log = []
 
     display_lines = top_k + 4
 
@@ -253,6 +352,21 @@ def stream_predict(
             (frame_w, frame_h),
         )
         logger.info(f"Writing annotated video to: {output_video}")
+
+    gradcam_writer = None
+    if output_gradcam is not None:
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter.fourcc(*"mp4v")
+        gradcam_writer = cv2.VideoWriter(
+            output_gradcam,
+            fourcc,
+            fps,
+            (frame_w, frame_h),
+        )
+        logger.info(f"Writing GradCAM video to: {output_gradcam}")
+
+    current_heatmap: Optional[np.ndarray] = None
 
     try:
         while True:
@@ -308,6 +422,13 @@ def stream_predict(
             elif writer is not None:
                 writer.write(frame)
 
+            # Write GradCAM frame
+            if gradcam_writer is not None and current_heatmap is not None:
+                gradcam_frame = overlay_heatmap(frame, current_heatmap)
+                gradcam_writer.write(gradcam_frame)
+            elif gradcam_writer is not None:
+                gradcam_writer.write(frame)
+
             # Wait until buffer is full, then predict every 16 frames
             if len(buf) == 16 and (frame_idx - 16) % 16 == 0:
                 clip = torch.stack(list(buf))  # [T,H,W,C]
@@ -325,6 +446,19 @@ def stream_predict(
                     top_k,
                 )
                 dt = time.time() - t0
+
+                # Compute GradCAM heatmap if needed
+                if gradcam_writer is not None:
+                    anomaly_idx = (
+                        labels.index("anomaly") if "anomaly" in labels else 0
+                    )
+                    current_heatmap = compute_gradcam(
+                        encoder,
+                        classifier,
+                        clip,
+                        anomaly_idx,
+                    )
+
                 del clip, feats
                 torch.cuda.empty_cache()
 
@@ -332,6 +466,13 @@ def stream_predict(
                 current_label = preds[0][0]
                 current_conf = preds[0][1]
                 class_counts[current_label] += 1
+
+                # Log anomaly score for this window
+                preds_dict = dict(preds)
+                anomaly_score = float(preds_dict.get("anomaly", preds[0][1]))
+                anomaly_log.append(
+                    {"frame": frame_idx, "anomaly_score": anomaly_score}
+                )
 
                 # Overwrite previous output
                 if window_count > 1:
@@ -364,6 +505,9 @@ def stream_predict(
         if writer is not None:
             writer.release()
             logger.info(f"Output video saved to: {output_video}")
+        if gradcam_writer is not None:
+            gradcam_writer.release()
+            logger.info(f"GradCAM video saved to: {output_gradcam}")
 
     logger.info(
         f"Streaming finished. "
@@ -389,6 +533,24 @@ def stream_predict(
             bar = "\u2588" * int(pct / 3)
             print(f"    {cls:36s} {cnt:3d}x  {pct:4.0f}% {bar}")
         print("=" * 50 + "\n")
+
+    # Write JSON log
+    if anomaly_log:
+        log_data = {
+            "video_source": video_source,
+            "total_frames": frame_idx,
+            "total_windows": window_count,
+            "fps": fps,
+            "scores": anomaly_log,
+        }
+        video_name_no_ext, _ = os.path.splitext(os.path.basename(video_source))
+        log_filepath = os.path.join(
+            os.path.dirname(video_source),
+            f"{video_name_no_ext}_anomaly_scores.json",
+        )
+        with open(log_filepath, "w") as f:
+            json.dump(log_data, f, indent=2)
+        logger.info(f"Anomaly score log saved to: {log_filepath}")
 
 
 def main():
@@ -469,6 +631,10 @@ def main():
                 os.path.dirname(video_path),
                 "output_" + os.path.basename(video_path),
             )
+            output_gradcam = os.path.join(
+                os.path.dirname(video_path),
+                "gradcam_" + os.path.basename(video_path),
+            )
             stream_predict(
                 video_source=video_path,
                 encoder=encoder,
@@ -477,6 +643,7 @@ def main():
                 top_k=args.top_k,
                 device=device,
                 output_video=output_video,
+                output_gradcam=output_gradcam,
             )
             continue
 
