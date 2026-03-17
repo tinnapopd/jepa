@@ -621,7 +621,10 @@ def main():
         raise SystemExit("Error: --video is required")
 
     if os.path.isdir(args.video):
-        video_paths = glob.glob(os.path.join(args.video, "*.mp4"))
+        video_paths = glob.glob(
+            os.path.join(args.video, "**", "*.mp4"),
+            recursive=True,
+        )
     else:
         video_paths = [args.video]
 
