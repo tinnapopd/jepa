@@ -11,3 +11,4 @@ datasets/
 
 # Output
 *.mp4
+*.json

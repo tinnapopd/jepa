@@ -546,7 +546,7 @@ def stream_predict(
         video_name_no_ext, _ = os.path.splitext(os.path.basename(video_source))
         log_filepath = os.path.join(
             os.path.dirname(video_source),
-            f"{video_name_no_ext}_anomaly_scores.json",
+            f"anomaly_scores_{video_name_no_ext}.json",
         )
         with open(log_filepath, "w") as f:
             json.dump(log_data, f, indent=2)
