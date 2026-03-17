@@ -12,3 +12,5 @@ datasets/
 # Output
 *.mp4
 *.json
+*.csv
+evaluation_*/
