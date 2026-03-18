@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Anomaly Detection Model Evaluation Script
 ==========================================
@@ -17,10 +16,14 @@ import csv
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 
+import matplotlib
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.ndimage import gaussian_filter1d  # type: ignore
 from sklearn.metrics import (
     auc,
     average_precision_score,
@@ -33,10 +36,25 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+# Try to use a font that supports Thai glyphs; fall back to DejaVu Sans
+_THAI_FONTS = [
+    "Tahoma",
+    "Angsana New",
+    "TH Sarabun New",
+    "Arial Unicode MS",
+    "Noto Sans Thai",
+]
+_found_font = None
+for _fname in _THAI_FONTS:
+    matches = fm.findSystemFonts(fontpaths=None)
+    if any(_fname.lower() in m.lower() for m in matches):
+        _found_font = _fname
+        break
+if _found_font:
+    matplotlib.rcParams["font.family"] = "sans-serif"
+    matplotlib.rcParams["font.sans-serif"] = [_found_font, "DejaVu Sans"]
 
-# ---------------------------------------------------------------------------
-# Data loading helpers
-# ---------------------------------------------------------------------------
+warnings.filterwarnings("ignore", message="Glyph .* missing from font")
 
 
 def load_labels(label_path: str) -> list[tuple[float, float]]:
@@ -76,20 +94,15 @@ def is_in_anomaly(
     return False
 
 
-# ---------------------------------------------------------------------------
-# Dataset collection
-# ---------------------------------------------------------------------------
-
-
 def collect_dataset(
     test_dataset_dir: str,
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     """Walk every subfolder and build parallel arrays of scores and labels.
 
     Returns:
-        all_scores  – (N,) float array of anomaly scores
-        all_labels  – (N,) int   array of binary ground-truth labels (0/1)
-        per_video   – list of dicts with per-video metadata for reporting
+        all_scores  - (N,) float array of anomaly scores
+        all_labels  - (N,) int   array of binary ground-truth labels (0/1)
+        per_video   - list of dicts with per-video metadata for reporting
     """
     all_scores: list[float] = []
     all_labels: list[int] = []
@@ -104,8 +117,8 @@ def collect_dataset(
         if not labels_dir.exists() or not videos_dir.exists():
             continue
 
-        for label_file in sorted(labels_dir.glob("video_*.csv")):
-            video_name = label_file.stem  # e.g. "video_1"
+        for label_file in sorted(labels_dir.glob("*.csv")):
+            video_name = label_file.stem
             score_file = videos_dir / f"anomaly_scores_{video_name}.json"
             if not score_file.exists():
                 continue
@@ -143,11 +156,6 @@ def collect_dataset(
             )
 
     return np.array(all_scores), np.array(all_labels), per_video
-
-
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
 
 
 def compute_metrics(
@@ -204,11 +212,6 @@ def permutation_test(
 
     p_value = np.mean(permuted_aucs >= real_auc)
     return real_auc, p_value, permuted_aucs  # type: ignore
-
-
-# ---------------------------------------------------------------------------
-# Visualization
-# ---------------------------------------------------------------------------
 
 
 def plot_roc_curve(
@@ -327,8 +330,24 @@ def plot_permutation_test(
     plt.close(fig)
 
 
+def smooth_scores(scores: np.ndarray, sigma: float) -> np.ndarray:
+    """Apply Gaussian smoothing to an array of scores.
+
+    Args:
+        scores: 1-D array of anomaly scores.
+        sigma:  Standard deviation for the Gaussian kernel.
+                0 means no smoothing (returns input unchanged).
+    """
+    if sigma <= 0 or len(scores) < 3:
+        return scores
+    return np.clip(gaussian_filter1d(scores.astype(float), sigma=sigma), 0, 1)
+
+
 def _plot_timeline_batch(
-    videos: list[dict], title: str, output_path: str
+    videos: list[dict],
+    title: str,
+    output_path: str,
+    sigma: float = 0.0,
 ) -> None:
     """Plot a batch of video timelines into a single figure."""
     n = len(videos)
@@ -340,14 +359,39 @@ def _plot_timeline_batch(
 
     for ax, v in zip(axes, videos):
         times = [f / v["fps"] for f in v["frames"]]
-        ax.plot(
-            times,
-            v["scores"],
-            "o-",
-            markersize=4,
-            color="#1976D2",
-            label="Anomaly Score",
-        )
+        raw = np.array(v["scores"])
+
+        if sigma > 0:
+            smoothed = smooth_scores(raw, sigma)
+            # raw scores as faded dots
+            ax.plot(
+                times,
+                raw,
+                "o",
+                markersize=3,
+                color="#90CAF9",
+                alpha=0.5,
+                label="Raw Score",
+            )
+            # smoothed curve as solid line
+            ax.plot(
+                times,
+                smoothed,
+                "-",
+                lw=2,
+                color="#1976D2",
+                label=f"Smoothed (sigma={sigma})",
+            )
+        else:
+            ax.plot(
+                times,
+                raw,
+                "o-",
+                markersize=4,
+                color="#1976D2",
+                label="Anomaly Score",
+            )
+
         for start, end in v["intervals"]:
             ax.axvspan(
                 start, end, alpha=0.25, color="#F44336", label="Ground Truth"
@@ -372,18 +416,27 @@ def _plot_timeline_batch(
 
 
 def plot_sample_timelines(
-    per_video: list[dict], output_path: str, max_videos: int = 6
+    per_video: list[dict],
+    output_path: str,
+    max_videos: int = 6,
+    sigma: float = 0.0,
 ) -> None:
     """Plot anomaly scores over time for a sample of videos."""
     anomalous = [v for v in per_video if v["n_anomalous"] > 0]
     sample = anomalous[:max_videos] if anomalous else per_video[:max_videos]
     _plot_timeline_batch(
-        sample, "Sample Video Timelines — Score vs Ground Truth", output_path
+        sample,
+        "Sample Video Timelines — Score vs Ground Truth",
+        output_path,
+        sigma=sigma,
     )
 
 
 def plot_all_timelines(
-    per_video: list[dict], output_dir: str, per_page: int = 5
+    per_video: list[dict],
+    output_dir: str,
+    per_page: int = 5,
+    sigma: float = 0.0,
 ) -> list[str]:
     """Save timeline plots for ALL videos, grouped by subfolder.
 
@@ -395,10 +448,18 @@ def plot_all_timelines(
     saved: list[str] = []
     subfolders = sorted(set(v["subfolder"] for v in per_video))
 
+    def _sort_key(v: dict) -> tuple:
+        """Sort numerically for video_N names, alphabetically otherwise."""
+        parts = v["video"].split("_")
+        try:
+            return (0, int(parts[-1]))
+        except (ValueError, IndexError):
+            return (1, v["video"])
+
     for sf in subfolders:
         sf_videos = sorted(
             [v for v in per_video if v["subfolder"] == sf],
-            key=lambda v: int(v["video"].split("_")[-1]),
+            key=_sort_key,
         )
         sf_dir = os.path.join(output_dir, "timelines", sf)
         os.makedirs(sf_dir, exist_ok=True)
@@ -412,15 +473,10 @@ def plot_all_timelines(
             fname = f"page_{page_num}.png"
             fpath = os.path.join(sf_dir, fname)
             title = f"{sf}  ({first_vid} – {last_vid})"
-            _plot_timeline_batch(batch, title, fpath)
+            _plot_timeline_batch(batch, title, fpath, sigma=sigma)
             saved.append(fpath)
 
     return saved
-
-
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
 
 
 def print_section(title: str) -> None:
@@ -437,9 +493,22 @@ def report(
     threshold: float,
     n_permutations: int,
     output_dir: str,
+    smooth_sigma: float = 0.0,
 ) -> None:
     """Print evaluation report and save all plots."""
     os.makedirs(output_dir, exist_ok=True)
+
+    # ---- Apply smoothing ----
+    if smooth_sigma > 0:
+        print(
+            f"\n  Applying Gaussian smoothing (sigma={smooth_sigma}) "
+            "to anomaly scores..."
+        )
+        all_scores = smooth_scores(all_scores, smooth_sigma)
+        for v in per_video:
+            v["scores"] = smooth_scores(
+                np.array(v["scores"]), smooth_sigma
+            ).tolist()
 
     # ---- Data Summary ----
     print_section("DATA SUMMARY")
@@ -509,12 +578,12 @@ def report(
         )
         print(f"  p-value          : {p_value:.4f}")
         if p_value < 0.01:
-            print("  ✅ HIGHLY SIGNIFICANT — model is NOT random (p < 0.01)")
+            print("  HIGHLY SIGNIFICANT — model is NOT random (p < 0.01)")
         elif p_value < 0.05:
-            print("  ✅ SIGNIFICANT — model is NOT random (p < 0.05)")
+            print("  SIGNIFICANT — model is NOT random (p < 0.05)")
         else:
             print(
-                "  ⚠️  NOT significant — cannot reject random baseline "
+                "  NOT significant — cannot reject random baseline "
                 f"(p = {p_value:.4f})"
             )
 
@@ -529,7 +598,9 @@ def report(
         "permutation_test.png": lambda p: plot_permutation_test(
             real_auc, permuted_aucs, p_value, p
         ),
-        "sample_timelines.png": lambda p: plot_sample_timelines(per_video, p),
+        "sample_timelines.png": lambda p: plot_sample_timelines(
+            per_video, p, sigma=smooth_sigma
+        ),
     }
     for name, fn in plots.items():
         path = os.path.join(output_dir, name)
@@ -538,18 +609,15 @@ def report(
 
     # Per-subfolder timeline plots (all videos)
     print("\n  Generating per-subfolder timeline plots (all videos)...")
-    timeline_paths = plot_all_timelines(per_video, output_dir)
+    timeline_paths = plot_all_timelines(
+        per_video, output_dir, sigma=smooth_sigma
+    )
     for tp in timeline_paths:
         print(f"  → {tp}")
 
     print(f"\n{'=' * 60}")
     print("  Evaluation complete.")
     print(f"{'=' * 60}\n")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -578,6 +646,12 @@ def main() -> None:
         default="evaluation_results",
         help="Directory to save plots (default: evaluation_results)",
     )
+    parser.add_argument(
+        "--smooth-sigma",
+        type=float,
+        default=0.0,
+        help="Gaussian smoothing sigma (0 = off, try 1.0–2.0) (default: 0)",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.test_dataset_dir):
@@ -597,6 +671,7 @@ def main() -> None:
         args.threshold,
         args.n_permutations,
         args.output_dir,
+        smooth_sigma=args.smooth_sigma,
     )
 
 
