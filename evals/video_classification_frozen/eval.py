@@ -61,12 +61,7 @@ pp = pprint.PrettyPrinter(indent=4)
 
 
 def main(args_eval, resume_preempt=False):
-
-    # ----------------------------------------------------------------------- #
-    #  PASSED IN PARAMS FROM CONFIG FILE
-    # ----------------------------------------------------------------------- #
-
-    # -- PRETRAIN
+    # PRETRAIN
     args_pretrain = args_eval.get("pretrain")
     checkpoint_key = args_pretrain.get("checkpoint_key", "target_encoder")
     model_name = args_pretrain.get("model_name", None)
@@ -83,7 +78,7 @@ def main(args_eval, resume_preempt=False):
     tubelet_size = args_pretrain.get("tubelet_size", 2)
     pretrain_frames_per_clip = args_pretrain.get("frames_per_clip", 1)
 
-    # -- DATA
+    # DATA
     args_data = args_eval.get("data")
     train_data_path = [args_data.get("dataset_train")]
     val_data_path = [args_data.get("dataset_val")]
@@ -95,7 +90,7 @@ def main(args_eval, resume_preempt=False):
     eval_duration = args_pretrain.get("clip_duration", None)
     eval_num_views_per_segment = args_data.get("num_views_per_segment", 1)
 
-    # -- OPTIMIZATION
+    # OPTIMIZATION
     args_opt = args_eval.get("optimization")
     resolution = args_opt.get("resolution", 224)
     batch_size = args_opt.get("batch_size")
@@ -108,13 +103,12 @@ def main(args_eval, resume_preempt=False):
     warmup = args_opt.get("warmup")
     use_bfloat16 = args_opt.get("use_bfloat16")
 
-    # -- EXPERIMENT-ID/TAG (optional)
+    # EXPERIMENT-ID/TAG (optional)
     resume_checkpoint = (
         args_eval.get("resume_checkpoint", False) or resume_preempt
     )
     eval_tag = args_eval.get("tag", None)
-
-    # ----------------------------------------------------------------------- #
+    snapshot_freq = args_eval.get("snapshot_freq", 0)
 
     try:
         mp.set_start_method("spawn")
@@ -130,7 +124,7 @@ def main(args_eval, resume_preempt=False):
     world_size, rank = init_distributed()
     logger.info(f"Initialized (rank/world-size) {rank}/{world_size}")
 
-    # -- log/checkpointing paths
+    # log/checkpointing paths
     folder = os.path.join(pretrain_folder, "video_classification_frozen/")
     if eval_tag is not None:
         folder = os.path.join(folder, eval_tag)
@@ -139,7 +133,7 @@ def main(args_eval, resume_preempt=False):
     log_file = os.path.join(folder, f"{tag}_r{rank}.csv")
     latest_path = os.path.join(folder, f"{tag}-latest.pth.tar")
 
-    # -- make csv_logger
+    # make csv_logger
     csv_logger = None
     if rank == 0:
         csv_logger = CSVLogger(
@@ -148,7 +142,7 @@ def main(args_eval, resume_preempt=False):
 
     # Initialize model
 
-    # -- pretrained encoder (frozen)
+    # pretrained encoder (frozen)
     encoder = init_model(
         crop_size=resolution,
         device=device,
@@ -177,7 +171,7 @@ def main(args_eval, resume_preempt=False):
     for p in encoder.parameters():
         p.requires_grad = False
 
-    # -- init classifier
+    # init classifier
     classifier = AttentiveClassifier(
         embed_dim=encoder.embed_dim,
         num_heads=encoder.num_heads,
@@ -218,7 +212,7 @@ def main(args_eval, resume_preempt=False):
     ipe = len(train_loader)
     logger.info(f"Dataloader created... iterations per epoch: {ipe}")
 
-    # -- optimizer and scheduler
+    # optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
         classifier=classifier,
         wd=wd,
@@ -232,7 +226,7 @@ def main(args_eval, resume_preempt=False):
     )
     classifier = DistributedDataParallel(classifier, static_graph=True)
 
-    # -- load training checkpoint
+    # load training checkpoint
     start_epoch = 0
     if resume_checkpoint:
         classifier, optimizer, scaler, start_epoch = load_checkpoint(
@@ -323,6 +317,23 @@ def main(args_eval, resume_preempt=False):
                     iteration=epoch + 1,
                 )
         save_checkpoint(epoch + 1)
+
+        # Upload model snapshot to ClearML every snapshot_freq epochs
+        if (
+            rank == 0
+            and snapshot_freq > 0
+            and (epoch + 1) % snapshot_freq == 0
+        ):
+            current_task = ClearMLTask.current_task()
+            if current_task and os.path.exists(latest_path):
+                current_task.update_output_model(
+                    model_path=latest_path,
+                    model_name=f"{tag}-classifier-e{epoch + 1}",
+                    auto_delete_file=False,
+                )
+                logger.info(
+                    f"Uploaded snapshot model (epoch {epoch + 1}) to ClearML"
+                )
 
     # Upload trained model to ClearML
     if rank == 0:
@@ -467,14 +478,14 @@ def load_checkpoint(device, r_path, classifier, opt, scaler):
         checkpoint = torch.load(r_path, map_location=torch.device("cpu"))
         epoch = checkpoint["epoch"]
 
-        # -- loading encoder
+        # loading encoder
         pretrained_dict = checkpoint["classifier"]
         msg = classifier.load_state_dict(pretrained_dict)
         logger.info(
             f"loaded pretrained classifier from epoch {epoch} with msg: {msg}"
         )
 
-        # -- loading optimizer
+        # loading optimizer
         opt.load_state_dict(checkpoint["opt"])
         if scaler is not None:
             scaler.load_state_dict(checkpoint["scaler"])
