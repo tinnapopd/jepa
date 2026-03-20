@@ -3,6 +3,7 @@ tasks_per_node: 1
 tag: anomaly-16x3x3
 eval_name: video_classification_frozen
 resume_checkpoint: false
+snapshot_freq: 5
 
 data:
   dataset_train: /home/sp/sp/jepa/datasets/train.csv

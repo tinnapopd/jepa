@@ -40,7 +40,7 @@ from src.utils.schedulers import (
 )
 from src.utils.logging import AverageMeter, CSVLogger
 
-from clearml import Logger as ClearMLLogger, Task as ClearMLTask
+from clearml import Logger as ClearMLLogger, Task as ClearMLTask, OutputModel
 
 from evals.video_classification_frozen.utils import (
     make_transforms,
@@ -326,9 +326,12 @@ def main(args_eval, resume_preempt=False):
         ):
             current_task = ClearMLTask.current_task()
             if current_task and os.path.exists(latest_path):
-                current_task.update_output_model(
-                    model_path=latest_path,
-                    model_name=f"{tag}-classifier-e{epoch + 1}",
+                snapshot_model = OutputModel(
+                    task=current_task,
+                    name=f"{tag}-classifier-e{epoch + 1}",
+                )
+                snapshot_model.update_weights(
+                    weights_filename=latest_path,
                     auto_delete_file=False,
                 )
                 logger.info(
