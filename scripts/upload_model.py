@@ -14,7 +14,9 @@ from clearml import OutputModel, Task
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Upload a pretrained model to ClearML")
+    parser = argparse.ArgumentParser(
+        description="Upload a pretrained model to ClearML"
+    )
     parser.add_argument(
         "--model_path",
         type=str,
@@ -24,8 +26,8 @@ def main():
     parser.add_argument(
         "--project",
         type=str,
-        default="V-JEPA",
-        help="ClearML project name (default: V-JEPA)",
+        default="v-jepa",
+        help="ClearML project name (default: v-jepa)",
     )
     parser.add_argument(
         "--name",
@@ -54,7 +56,9 @@ def main():
         task_type=Task.TaskTypes.custom,
     )
     if task is None:
-        raise RuntimeError("Failed to initialize ClearML task. Check your ClearML configuration.")
+        raise RuntimeError(
+            "Failed to initialize ClearML task. Check your ClearML configuration."
+        )
 
     # Upload the model
     output_model = OutputModel(

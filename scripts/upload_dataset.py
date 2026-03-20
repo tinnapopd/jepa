@@ -38,8 +38,8 @@ def main():
     parser.add_argument(
         "--project",
         type=str,
-        default="V-JEPA",
-        help="ClearML project name (default: V-JEPA)",
+        default="v-jepa",
+        help="ClearML project name (default: v-jepa)",
     )
     parser.add_argument(
         "--name",
