@@ -10,7 +10,7 @@ data:
   dataset_type: VideoDataset
   num_classes: 2
   frames_per_clip: 16
-  num_segments: 3
+  num_segments: 6
   num_views_per_segment: 3
   frame_step: 4
 
