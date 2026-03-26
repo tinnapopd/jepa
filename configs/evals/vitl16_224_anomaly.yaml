@@ -20,11 +20,11 @@ optimization:
   num_epochs: 30
   resolution: 224
   batch_size: 4
-  weight_decay: 0.01
-  lr: 0.0005
-  start_lr: 0.0005
+  weight_decay: 0.05
+  lr: 0.0001
+  start_lr: 0.0001
   final_lr: 0.0
-  warmup: 0.
+  warmup: 3
   use_bfloat16: true
 
 pretrain:
